@@ -1,48 +1,68 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
+import { mapProduct, supabase } from './lib/supabase'
 
-const STORAGE_KEY = 'inventory-plus-products'
-
-const initialProducts = [
-  { id: 1, name: 'Laptop Pro 14', category: 'Electrónica', price: 1200, cost: 850, stock: 12, sold: 5, sku: 'LP-14' },
-  { id: 2, name: 'Auriculares BT', category: 'Accesorios', price: 189, cost: 90, stock: 4, sold: 2, sku: 'BT-01' },
-  { id: 3, name: 'Monitor 27"', category: 'Oficina', price: 420, cost: 260, stock: 7, sold: 3, sku: 'MON-27' },
-  { id: 4, name: 'Teclado mecánico', category: 'Accesorios', price: 95, cost: 45, stock: 2, sold: 1, sku: 'TEC-88' },
-]
+const emptyForm = {
+  name: '',
+  category: 'Electrónica',
+  price: '',
+  cost: '',
+  stock: '',
+  sold: '',
+  sku: '',
+}
 
 function App() {
-  const [products, setProducts] = useState(() => {
-    try {
-      const savedProducts = localStorage.getItem(STORAGE_KEY)
-      return savedProducts ? JSON.parse(savedProducts) : initialProducts
-    } catch (error) {
-      return initialProducts
-    }
-  })
-
-  const [form, setForm] = useState({
-    name: '',
-    category: 'Electrónica',
-    price: '',
-    cost: '',
-    stock: '',
-    sold: '',
-    sku: '',
-  })
-
+  const [products, setProducts] = useState([])
+  const [form, setForm] = useState(emptyForm)
   const [editingId, setEditingId] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
 
   const [shipping, setShipping] = useState({
     productPrice: '299',
     shippingType: 'metro',
   })
 
+  const loadProducts = useCallback(async () => {
+    setError(null)
+    const { data, error: fetchError } = await supabase
+      .from('products')
+      .select('*')
+      .order('id', { ascending: false })
+
+    if (fetchError) {
+      setError(fetchError.message)
+      return
+    }
+
+    setProducts((data ?? []).map(mapProduct))
+  }, [])
+
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(products))
-  }, [products])
+    let active = true
+
+    async function init() {
+      setLoading(true)
+      await loadProducts()
+      if (active) {
+        setLoading(false)
+      }
+    }
+
+    init()
+
+    return () => {
+      active = false
+    }
+  }, [loadProducts])
 
   const totals = useMemo(() => {
-    const totalInventoryValue = products.reduce((sum, product) => sum + Number(product.stock ?? 0) * Number(product.cost ?? 0), 0)
+    const totalInventoryValue = products.reduce(
+      (sum, product) => sum + Number(product.stock ?? 0) * Number(product.cost ?? 0),
+      0,
+    )
     const totalUnits = products.reduce((sum, product) => sum + Number(product.stock ?? 0), 0)
     const totalSold = products.reduce((sum, product) => sum + Number(product.sold ?? 0), 0)
     const lowStock = products.filter((product) => Number(product.stock ?? 0) <= 5).length
@@ -84,7 +104,35 @@ function App() {
     setShipping((current) => ({ ...current, [name]: value }))
   }
 
-  const handleSubmit = (event) => {
+  const persistProduct = async (productData) => {
+    if (editingId) {
+      const { error: updateError } = await supabase
+        .from('products')
+        .update({
+          name: productData.name,
+          category: productData.category,
+          price: productData.price,
+          cost: productData.cost,
+          stock: productData.stock,
+          sold: productData.sold,
+          sku: productData.sku,
+        })
+        .eq('id', editingId)
+
+      if (updateError) {
+        throw updateError
+      }
+      return
+    }
+
+    const { error: insertError } = await supabase.from('products').insert(productData)
+
+    if (insertError) {
+      throw insertError
+    }
+  }
+
+  const handleSubmit = async (event) => {
     event.preventDefault()
 
     if (!form.name || !form.price || !form.stock) {
@@ -92,7 +140,6 @@ function App() {
     }
 
     const productData = {
-      id: editingId ?? Date.now(),
       name: form.name.trim(),
       category: form.category,
       price: Number(form.price),
@@ -102,48 +149,90 @@ function App() {
       sku: form.sku.trim() || `SKU-${Date.now().toString().slice(-6)}`,
     }
 
-    if (editingId) {
-      setProducts((current) =>
-        current.map((product) => (product.id === editingId ? productData : product)),
-      )
-    } else {
-      setProducts((current) => [productData, ...current])
-    }
+    setSaving(true)
+    setError(null)
 
-    setForm({ name: '', category: 'Electrónica', price: '', cost: '', stock: '', sold: '', sku: '' })
-    setEditingId(null)
-  }
-
-  const updateStock = (productId, delta) => {
-    setProducts((current) =>
-      current.map((product) =>
-        product.id === productId
-          ? { ...product, stock: Math.max(0, product.stock + delta) }
-          : product,
-      ),
-    )
-  }
-
-  const removeProduct = (productId) => {
-    setProducts((current) => current.filter((product) => product.id !== productId))
-    if (editingId === productId) {
+    try {
+      await persistProduct(productData)
+      await loadProducts()
+      setForm(emptyForm)
       setEditingId(null)
-      setForm({ name: '', category: 'Electrónica', price: '', cost: '', stock: '', sold: '', sku: '' })
+    } catch (submitError) {
+      setError(submitError.message ?? 'No se pudo guardar el producto.')
+    } finally {
+      setSaving(false)
     }
   }
 
-  const recordSale = (productId) => {
-    setProducts((current) =>
-      current.map((product) => {
-        if (product.id !== productId) return product
+  const updateProductInDb = async (productId, patch) => {
+    const { error: updateError } = await supabase.from('products').update(patch).eq('id', productId)
 
-        return {
-          ...product,
-          sold: Number(product.sold ?? 0) + 1,
-          stock: Math.max(0, Number(product.stock ?? 0) - 1),
-        }
-      }),
-    )
+    if (updateError) {
+      throw updateError
+    }
+  }
+
+  const updateStock = async (productId, delta) => {
+    const product = products.find((item) => item.id === productId)
+    if (!product) return
+
+    setSaving(true)
+    setError(null)
+
+    try {
+      await updateProductInDb(productId, {
+        stock: Math.max(0, product.stock + delta),
+      })
+      await loadProducts()
+    } catch (stockError) {
+      setError(stockError.message ?? 'No se pudo actualizar el stock.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const removeProduct = async (productId) => {
+    setSaving(true)
+    setError(null)
+
+    try {
+      const { error: deleteError } = await supabase.from('products').delete().eq('id', productId)
+
+      if (deleteError) {
+        throw deleteError
+      }
+
+      if (editingId === productId) {
+        setEditingId(null)
+        setForm(emptyForm)
+      }
+
+      await loadProducts()
+    } catch (deleteError) {
+      setError(deleteError.message ?? 'No se pudo eliminar el producto.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const recordSale = async (productId) => {
+    const product = products.find((item) => item.id === productId)
+    if (!product) return
+
+    setSaving(true)
+    setError(null)
+
+    try {
+      await updateProductInDb(productId, {
+        sold: Number(product.sold ?? 0) + 1,
+        stock: Math.max(0, Number(product.stock ?? 0) - 1),
+      })
+      await loadProducts()
+    } catch (saleError) {
+      setError(saleError.message ?? 'No se pudo registrar la venta.')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const editProduct = (product) => {
@@ -170,6 +259,8 @@ function App() {
           Exportar resumen
         </button>
       </header>
+
+      {error && <p className="empty-state">{error}</p>}
 
       <main className="dashboard">
         <section className="summary-grid">
@@ -249,7 +340,7 @@ function App() {
                 SKU
                 <input name="sku" value={form.sku} onChange={handleFieldChange} placeholder="SKU-001" />
               </label>
-              <button type="submit" className="primary-button full-width">
+              <button type="submit" className="primary-button full-width" disabled={saving}>
                 {editingId ? 'Guardar cambios' : 'Agregar producto'}
               </button>
             </form>
@@ -260,7 +351,7 @@ function App() {
                 className="cancel-button"
                 onClick={() => {
                   setEditingId(null)
-                  setForm({ name: '', category: 'Electrónica', price: '', cost: '', stock: '', sold: '', sku: '' })
+                  setForm(emptyForm)
                 }}
               >
                 Cancelar edición
@@ -268,50 +359,54 @@ function App() {
             )}
 
             <div className="product-list">
-              {products.map((product) => (
-                <article key={product.id} className={`product-card ${product.stock <= 5 ? 'warning' : ''}`}>
-                  <div className="product-main">
-                    <div>
-                      <p className="sku">{product.sku}</p>
-                      <h3>{product.name}</h3>
+              {loading ? (
+                <p className="empty-state">Cargando productos desde Supabase…</p>
+              ) : (
+                products.map((product) => (
+                  <article key={product.id} className={`product-card ${product.stock <= 5 ? 'warning' : ''}`}>
+                    <div className="product-main">
+                      <div>
+                        <p className="sku">{product.sku}</p>
+                        <h3>{product.name}</h3>
+                      </div>
+                      <span className="category-badge">{product.category}</span>
                     </div>
-                    <span className="category-badge">{product.category}</span>
-                  </div>
 
-                  <div className="product-meta">
-                    <div>
-                      <span>Precio</span>
-                      <strong>${product.price.toLocaleString()}</strong>
+                    <div className="product-meta">
+                      <div>
+                        <span>Precio</span>
+                        <strong>${product.price.toLocaleString()}</strong>
+                      </div>
+                      <div>
+                        <span>En existencia</span>
+                        <strong>{product.stock}</strong>
+                      </div>
+                      <div>
+                        <span>Vendidos</span>
+                        <strong>{product.sold}</strong>
+                      </div>
                     </div>
-                    <div>
-                      <span>En existencia</span>
-                      <strong>{product.stock}</strong>
-                    </div>
-                    <div>
-                      <span>Vendidos</span>
-                      <strong>{product.sold}</strong>
-                    </div>
-                  </div>
 
-                  <div className="product-actions">
-                    <button type="button" className="mini-button" onClick={() => updateStock(product.id, -1)}>
-                      -
-                    </button>
-                    <button type="button" className="mini-button" onClick={() => updateStock(product.id, 1)}>
-                      +
-                    </button>
-                    <button type="button" className="sale-button" onClick={() => recordSale(product.id)}>
-                      Vender
-                    </button>
-                    <button type="button" className="edit-button" onClick={() => editProduct(product)}>
-                      Editar
-                    </button>
-                    <button type="button" className="delete-button" onClick={() => removeProduct(product.id)}>
-                      Eliminar
-                    </button>
-                  </div>
-                </article>
-              ))}
+                    <div className="product-actions">
+                      <button type="button" className="mini-button" disabled={saving} onClick={() => updateStock(product.id, -1)}>
+                        -
+                      </button>
+                      <button type="button" className="mini-button" disabled={saving} onClick={() => updateStock(product.id, 1)}>
+                        +
+                      </button>
+                      <button type="button" className="sale-button" disabled={saving} onClick={() => recordSale(product.id)}>
+                        Vender
+                      </button>
+                      <button type="button" className="edit-button" disabled={saving} onClick={() => editProduct(product)}>
+                        Editar
+                      </button>
+                      <button type="button" className="delete-button" disabled={saving} onClick={() => removeProduct(product.id)}>
+                        Eliminar
+                      </button>
+                    </div>
+                  </article>
+                ))
+              )}
             </div>
           </div>
 
