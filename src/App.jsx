@@ -12,6 +12,20 @@ const emptyForm = {
   sku: '',
 }
 
+function isHeadphoneProduct(name) {
+  const normalized = name
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+
+  return (
+    normalized.includes('audifon') ||
+    normalized.includes('auricular') ||
+    normalized.includes('headphone') ||
+    normalized.includes('earphone')
+  )
+}
+
 function App() {
   const [products, setProducts] = useState([])
   const [form, setForm] = useState(emptyForm)
@@ -66,9 +80,15 @@ function App() {
     const totalUnits = products.reduce((sum, product) => sum + Number(product.stock ?? 0), 0)
     const totalSold = products.reduce((sum, product) => sum + Number(product.sold ?? 0), 0)
     const lowStock = products.filter((product) => Number(product.stock ?? 0) <= 5).length
-    const earphonesRevenue = products
-      .filter((product) => product.name.toLowerCase().includes('auriculares'))
-      .reduce((sum, product) => sum + Number(product.sold ?? 0) * Number(product.price ?? 0), 0)
+    const headphoneProducts = products.filter((product) => isHeadphoneProduct(product.name))
+    const earphonesRevenue = headphoneProducts.reduce(
+      (sum, product) => sum + Number(product.sold ?? 0) * Number(product.price ?? 0),
+      0,
+    )
+    const earphonesSold = headphoneProducts.reduce(
+      (sum, product) => sum + Number(product.sold ?? 0),
+      0,
+    )
 
     return {
       totalProducts: products.length,
@@ -77,6 +97,7 @@ function App() {
       totalInventoryValue,
       lowStock,
       earphonesRevenue,
+      earphonesSold,
     }
   }, [products])
 
@@ -292,7 +313,9 @@ function App() {
           <article className="summary-card accent">
             <span>Recaudado audífonos</span>
             <strong>${totals.earphonesRevenue.toLocaleString()}</strong>
-            <small>Precio × unidades vendidas</small>
+            <small>
+              {totals.earphonesSold} vendidos · precio × unidades
+            </small>
           </article>
         </section>
 
